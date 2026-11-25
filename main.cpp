@@ -2,6 +2,8 @@
 #define _UNICODE
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <shellapi.h>
+#include <oleauto.h>
 #include <tlhelp32.h>
 #include <xamlom.h>
 #include <inspectable.h>
@@ -9,9 +11,11 @@
 
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "oleaut32.lib")
+#pragma comment(lib, "shell32.lib")
 
 // ==========================================
-// 1-QISM: XAML VISUAL TREE TRACKER (XAVFSIZ)
+// 1-QISM: XAML VISUAL TREE TRACKER (WINUI 3 + UWP)
 // ==========================================
 
 struct VisualTreeTracker : IVisualTreeServiceCallback2
@@ -37,48 +41,30 @@ struct VisualTreeTracker : IVisualTreeServiceCallback2
         ULONG r = InterlockedDecrement(&m_ref);
         if (r == 0)
         {
-            if (m_diag) m_diag->Release();
             if (m_service) m_service->Release();
             delete this;
         }
         return r;
     }
 
-    IXamlDiagnostics* m_diag = nullptr;
-
     HRESULT STDMETHODCALLTYPE OnVisualTreeChange(ParentChildRelation relation, VisualElement element, VisualMutationType mutationType) override
     {
         if (mutationType == Add && element.Handle != 0 && m_service)
         {
             std::wstring name = element.Name ? element.Name : L"";
-            std::wstring type = element.Type ? element.Type : L"";
 
-            // Faqat aniq nomlangan Taskbar fon elementlarini ushlash (Crash ni oldini oladi!)
+            // Faqat aniq nomlangan Taskbar fon elementlarini ushlash
             if (name == L"BackgroundFill" ||
                 name == L"BackgroundStroke" ||
                 name == L"TaskbarBackground" ||
                 name == L"SystemTrayFrameBackground")
             {
-                // Rasmiy XAML Diagnostics API orqali Opacity = 0.0 berish (Vtable xavfisiz!)
-                // ClearProperty yoki SetPropertyValue o'rniga IPropertyChainValue orqali xavfsiz o'zgartirish
-                if (m_diag)
-                {
-                    IInspectable* insp = nullptr;
-                    if (SUCCEEDED(m_diag->GetIInspectableFromHandle(element.Handle, &insp)) && insp)
-                    {
-                        // WinUI 3 IUIElement2 / IUIElement (put_Opacity = vtable index 13 emas, aniq interfeys tekshiruvi)
-                        // Xavfsiz usul: elementning Visibility xususiyatini Collapsed (1) qilish o'rniga
-                        // IVisualTreeService3::SetPropertyValue dan foydalanish
-                        insp->Release();
-                    }
-                }
-
-                // IVisualTreeService3::SetPropertyValue(InstanceHandle element, InstanceHandle propertyValue, unsigned int propertyIndex)
-                // Opacity uchun 0.0 qiymat yaratish (CreateInstance orqali)
+                BSTR bstrType = SysAllocString(L"Windows.Foundation.Double");
+                BSTR bstrVal = SysAllocString(L"0");
                 InstanceHandle valHandle = 0;
-                if (SUCCEEDED(m_service->CreateInstance(L"Windows.Foundation.Double", L"0", &valHandle)) && valHandle != 0)
+
+                if (SUCCEEDED(m_service->CreateInstance(bstrType, bstrVal, &valHandle)) && valHandle != 0)
                 {
-                    // Property index ni topish uchun GetPropertyValuesChain chaqiramiz
                     unsigned int sourceCount = 0;
                     PropertyChainSource* sources = nullptr;
                     unsigned int propCount = 0;
@@ -90,7 +76,8 @@ struct VisualTreeTracker : IVisualTreeServiceCallback2
                         {
                             if (props[i].PropertyName && wcscmp(props[i].PropertyName, L"Opacity") == 0)
                             {
-                                m_service->SetPropertyValue(element.Handle, valHandle, props[i].PropertyIndex);
+                                // XAMLOM rasmiy metodi: SetProperty (PropertyChainValue.Index bilan)
+                                m_service->SetProperty(element.Handle, valHandle, props[i].Index);
                                 break;
                             }
                         }
@@ -98,6 +85,9 @@ struct VisualTreeTracker : IVisualTreeServiceCallback2
                         if (props) CoTaskMemFree(props);
                     }
                 }
+
+                if (bstrType) SysFreeString(bstrType);
+                if (bstrVal) SysFreeString(bstrVal);
             }
         }
         return S_OK;
@@ -142,19 +132,11 @@ struct HookSite : IObjectWithSite
         {
             m_site->AddRef();
             IVisualTreeService3* service = nullptr;
-            IXamlDiagnostics* diag = nullptr;
-            m_site->QueryInterface(__uuidof(IXamlDiagnostics), (void**)&diag);
-
             if (SUCCEEDED(m_site->QueryInterface(__uuidof(IVisualTreeService3), (void**)&service)) && service)
             {
                 auto tracker = new VisualTreeTracker();
-                tracker->m_diag = diag;
                 tracker->m_service = service;
                 service->AdviseVisualTreeChange(tracker);
-            }
-            else if (diag)
-            {
-                diag->Release();
             }
         }
         return S_OK;
@@ -282,7 +264,6 @@ void ApplyZeroOpacity()
 
 void RestartExplorer()
 {
-    // Qora terminal ochilmasdan (CREATE_NO_WINDOW) explorer ni qayta ishga tushirish
     STARTUPINFOW si = { sizeof(si) };
     PROCESS_INFORMATION pi = {};
     wchar_t cmdKill[] = L"taskkill.exe /f /im explorer.exe";
