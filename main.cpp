@@ -8,14 +8,21 @@
 #include <xamlom.h>
 #include <inspectable.h>
 #include <string>
+#include <fstream>
 
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "oleaut32.lib")
 #pragma comment(lib, "shell32.lib")
 
+void LogMsg(const std::wstring& msg)
+{
+    std::wofstream f(L"C:\\Users\\Public\\glass_log.txt", std::ios::app);
+    if (f.is_open()) f << msg << L"\n";
+}
+
 // ==========================================
-// 1-QISM: XAML VISUAL TREE TRACKER (WINUI 3 + UWP)
+// 1-QISM: XAML VISUAL TREE TRACKER
 // ==========================================
 
 struct VisualTreeTracker : IVisualTreeServiceCallback2
@@ -52,12 +59,18 @@ struct VisualTreeTracker : IVisualTreeServiceCallback2
         if (mutationType == Add && element.Handle != 0 && m_service)
         {
             std::wstring name = element.Name ? element.Name : L"";
+            std::wstring type = element.Type ? element.Type : L"";
 
-            // Faqat aniq nomlangan Taskbar fon elementlarini ushlash
+            if (!name.empty() || type.find(L"Taskbar") != std::wstring::npos || type.find(L"Rectangle") != std::wstring::npos)
+            {
+                LogMsg(L"Elem: Name=[" + name + L"] Type=[" + type + L"]");
+            }
+
             if (name == L"BackgroundFill" ||
                 name == L"BackgroundStroke" ||
                 name == L"TaskbarBackground" ||
-                name == L"SystemTrayFrameBackground")
+                name == L"SystemTrayFrameBackground" ||
+                name.find(L"Background") != std::wstring::npos)
             {
                 BSTR bstrType = SysAllocString(L"Windows.Foundation.Double");
                 BSTR bstrVal = SysAllocString(L"0");
@@ -76,8 +89,8 @@ struct VisualTreeTracker : IVisualTreeServiceCallback2
                         {
                             if (props[i].PropertyName && wcscmp(props[i].PropertyName, L"Opacity") == 0)
                             {
-                                // XAMLOM rasmiy metodi: SetProperty (PropertyChainValue.Index bilan)
-                                m_service->SetProperty(element.Handle, valHandle, props[i].Index);
+                                HRESULT hr = m_service->SetProperty(element.Handle, valHandle, props[i].Index);
+                                LogMsg(L"  -> SetProperty Opacity=0 for [" + name + L"] HR=" + std::to_wstring(hr));
                                 break;
                             }
                         }
@@ -126,6 +139,7 @@ struct HookSite : IObjectWithSite
 
     HRESULT STDMETHODCALLTYPE SetSite(IUnknown* pUnkSite) override
     {
+        LogMsg(L"SetSite called!");
         if (m_site) m_site->Release();
         m_site = pUnkSite;
         if (m_site)
@@ -134,9 +148,11 @@ struct HookSite : IObjectWithSite
             IVisualTreeService3* service = nullptr;
             if (SUCCEEDED(m_site->QueryInterface(__uuidof(IVisualTreeService3), (void**)&service)) && service)
             {
+                LogMsg(L"IVisualTreeService3 acquired! Advising...");
                 auto tracker = new VisualTreeTracker();
                 tracker->m_service = service;
-                service->AdviseVisualTreeChange(tracker);
+                HRESULT hr = service->AdviseVisualTreeChange(tracker);
+                LogMsg(L"AdviseVisualTreeChange HR=" + std::to_wstring(hr));
             }
         }
         return S_OK;
@@ -166,6 +182,7 @@ struct HookFactory : IClassFactory
     ULONG STDMETHODCALLTYPE Release() override { ULONG r = InterlockedDecrement(&m_ref); if (r == 0) delete this; return r; }
     HRESULT STDMETHODCALLTYPE CreateInstance(IUnknown* pUnkOuter, REFIID riid, void** ppvObject) override
     {
+        LogMsg(L"HookFactory::CreateInstance called!");
         if (pUnkOuter) return CLASS_E_NOAGGREGATION;
         auto site = new HookSite();
         HRESULT hr = site->QueryInterface(riid, ppvObject);
@@ -177,6 +194,7 @@ struct HookFactory : IClassFactory
 
 STDAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, LPVOID* ppv)
 {
+    LogMsg(L"DllGetClassObject called!");
     CLSID clsid = { 0x361c3466, 0x8573, 0x4e2a, { 0xb1, 0xb2, 0x9d, 0x1c, 0x7f, 0x4d, 0x8a, 0x11 } };
     if (rclsid == clsid)
     {
@@ -190,27 +208,42 @@ STDAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, LPVOID* ppv)
 
 void StartXamlHookInExplorer()
 {
+    LogMsg(L"StartXamlHookInExplorer started in PID=" + std::to_wstring(GetCurrentProcessId()));
+
     wchar_t modPath[MAX_PATH];
     HMODULE hMod = nullptr;
     GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
         reinterpret_cast<LPCWSTR>(&StartXamlHookInExplorer), &hMod);
     GetModuleFileNameW(hMod, modPath, MAX_PATH);
+    LogMsg(L"Module path: " + std::wstring(modPath));
 
     CLSID clsid = { 0x361c3466, 0x8573, 0x4e2a, { 0xb1, 0xb2, 0x9d, 0x1c, 0x7f, 0x4d, 0x8a, 0x11 } };
     using pfnInit = HRESULT(WINAPI*)(LPCWSTR, DWORD, LPCWSTR, LPCWSTR, CLSID, LPCWSTR);
 
+    // 1. WinUI 3 (Microsoft.UI.Xaml.dll)
     HMODULE mux = GetModuleHandleW(L"Microsoft.UI.Xaml.dll");
+    LogMsg(L"Microsoft.UI.Xaml.dll handle=" + std::to_wstring((uintptr_t)mux));
     if (mux)
     {
         auto initFunc = (pfnInit)GetProcAddress(mux, "InitializeXamlDiagnosticsEx");
-        if (initFunc) initFunc(L"VisualDiagConnection1", GetCurrentProcessId(), L"", modPath, clsid, L"");
+        if (initFunc)
+        {
+            HRESULT hr = initFunc(L"VisualDiagConnection1", GetCurrentProcessId(), L"", modPath, clsid, L"");
+            LogMsg(L"MUX InitializeXamlDiagnosticsEx HR=" + std::to_wstring(hr));
+        }
     }
 
+    // 2. UWP XAML (Windows.UI.Xaml.dll)
     HMODULE wux = GetModuleHandleW(L"Windows.UI.Xaml.dll");
+    LogMsg(L"Windows.UI.Xaml.dll handle=" + std::to_wstring((uintptr_t)wux));
     if (wux)
     {
         auto initFunc = (pfnInit)GetProcAddress(wux, "InitializeXamlDiagnosticsEx");
-        if (initFunc) initFunc(L"VisualDiagConnection2", GetCurrentProcessId(), L"", modPath, clsid, L"");
+        if (initFunc)
+        {
+            HRESULT hr = initFunc(L"VisualDiagConnection2", GetCurrentProcessId(), L"", modPath, clsid, L"");
+            LogMsg(L"WUX InitializeXamlDiagnosticsEx HR=" + std::to_wstring(hr));
+        }
     }
 }
 
@@ -220,26 +253,27 @@ void StartXamlHookInExplorer()
 
 void ApplyZeroOpacity()
 {
-    DWORD explorerPid = 0;
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    PROCESSENTRY32W pe = { sizeof(pe) };
-    if (Process32FirstW(snap, &pe))
-    {
-        do {
-            if (_wcsicmp(pe.szExeFile, L"explorer.exe") == 0) {
-                explorerPid = pe.th32ProcessID;
-                break;
-            }
-        } while (Process32NextW(snap, &pe));
-    }
-    CloseHandle(snap);
+    DeleteFileW(L"C:\\Users\\Public\\glass_log.txt");
+    LogMsg(L"ApplyZeroOpacity clicked.");
 
-    if (!explorerPid) return;
+    HWND taskbar = FindWindowW(L"Shell_TrayWnd", nullptr);
+    DWORD targetPid = 0;
+    if (taskbar)
+    {
+        GetWindowThreadProcessId(taskbar, &targetPid);
+        LogMsg(L"Found Shell_TrayWnd HWND=" + std::to_wstring((uintptr_t)taskbar) + L" PID=" + std::to_wstring(targetPid));
+    }
+
+    if (!targetPid)
+    {
+        MessageBoxW(nullptr, L"Shell_TrayWnd topilmadi!", L"Xatolik", MB_OK | MB_ICONERROR);
+        return;
+    }
 
     wchar_t exePath[MAX_PATH];
     GetModuleFileNameW(nullptr, exePath, MAX_PATH);
 
-    HANDLE hProc = OpenProcess(PROCESS_ALL_ACCESS, FALSE, explorerPid);
+    HANDLE hProc = OpenProcess(PROCESS_ALL_ACCESS, FALSE, targetPid);
     if (hProc)
     {
         size_t size = (wcslen(exePath) + 1) * sizeof(wchar_t);
@@ -254,11 +288,11 @@ void ApplyZeroOpacity()
             CloseHandle(hThread);
         }
         CloseHandle(hProc);
-        MessageBoxW(nullptr, L"Xavfsiz XAML Hook muvaffaqiyatli yuborildi!", L"GlassTaskbar", MB_OK | MB_ICONINFORMATION);
+        MessageBoxW(nullptr, L"Hook yuborildi! Log fayl: C:\\Users\\Public\\glass_log.txt", L"GlassTaskbar", MB_OK | MB_ICONINFORMATION);
     }
     else
     {
-        MessageBoxW(nullptr, L"Dasturni Administrator sifatida ishga tushiring!", L"Xatolik", MB_OK | MB_ICONERROR);
+        MessageBoxW(nullptr, L"OpenProcess rad etildi! Run as Administrator qiling.", L"Xatolik", MB_OK | MB_ICONERROR);
     }
 }
 
