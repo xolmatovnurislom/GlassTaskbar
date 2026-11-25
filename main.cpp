@@ -1,9 +1,13 @@
 #define UNICODE
 #define _UNICODE
+#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <tlhelp32.h>
 #include <xamlom.h>
 #include <inspectable.h>
+
+#undef GetCurrentTime
+
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.UI.Xaml.h>
 #include <string>
@@ -14,10 +18,6 @@
 
 using namespace winrt;
 using namespace Windows::UI::Xaml;
-
-// ==========================================
-// 1-QISM: XAML VISUAL TREE INJECTOR (DLL REJIMI)
-// ==========================================
 
 struct VisualTreeTracker : winrt::implements<VisualTreeTracker, IVisualTreeServiceCallback2>
 {
@@ -109,7 +109,7 @@ struct HookFactory : winrt::implements<HookFactory, IClassFactory>
     HRESULT STDMETHODCALLTYPE LockServer(BOOL) override { return S_OK; }
 };
 
-extern "C" __declspec(dllexport) HRESULT __stdcall DllGetClassObject(REFCLSID rclsid, REFIID riid, LPVOID* ppv)
+STDAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, LPVOID* ppv)
 {
     CLSID clsid = { 0x361c3466, 0x8573, 0x4e2a, { 0xb1, 0xb2, 0x9d, 0x1c, 0x7f, 0x4d, 0x8a, 0x11 } };
     if (rclsid == clsid)
@@ -118,10 +118,6 @@ extern "C" __declspec(dllexport) HRESULT __stdcall DllGetClassObject(REFCLSID rc
     }
     return CLASS_E_CLASSNOTAVAILABLE;
 }
-
-// ==========================================
-// 2-QISM: BOSHQARUV UI VA INJECTOR (EXE REJIMI)
-// ==========================================
 
 struct AccentPolicy {
     int AccentState;
@@ -138,7 +134,6 @@ struct WindowCompositionAttributeData {
 
 void ApplyZeroOpacity()
 {
-    // 1. Tashqi oynani shaffof qilish
     HWND taskbar = FindWindowW(L"Shell_TrayWnd", nullptr);
     if (taskbar)
     {
@@ -153,7 +148,6 @@ void ApplyZeroOpacity()
         }
     }
 
-    // 2. O'zimizning .exe faylni explorer.exe ichiga yuklash
     DWORD explorerPid = 0;
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     PROCESSENTRY32W pe = { sizeof(pe) };
@@ -220,10 +214,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     return 0;
 }
 
-// ==========================================
-// 3-QISM: KIRISH NUQTALARI (EXE VA DLL)
-// ==========================================
-
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow)
 {
     WNDCLASSW wc = {};
@@ -248,7 +238,6 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow)
     return 0;
 }
 
-// Agar fayl explorer.exe ichiga yuklansa (DLL kabi), shu qism ishlaydi
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID)
 {
     if (reason == DLL_PROCESS_ATTACH)
