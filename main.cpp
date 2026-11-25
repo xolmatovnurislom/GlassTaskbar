@@ -11,13 +11,13 @@
 #pragma comment(lib, "ole32.lib")
 
 // ==========================================
-// 1-QISM: XAML VISUAL TREE TRACKER (WINUI 3 + UWP)
+// 1-QISM: XAML VISUAL TREE TRACKER (XAVFSIZ)
 // ==========================================
 
 struct VisualTreeTracker : IVisualTreeServiceCallback2
 {
     LONG m_ref = 1;
-    IXamlDiagnostics* m_diag = nullptr;
+    IVisualTreeService3* m_service = nullptr;
 
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override
     {
@@ -38,40 +38,65 @@ struct VisualTreeTracker : IVisualTreeServiceCallback2
         if (r == 0)
         {
             if (m_diag) m_diag->Release();
+            if (m_service) m_service->Release();
             delete this;
         }
         return r;
     }
 
+    IXamlDiagnostics* m_diag = nullptr;
+
     HRESULT STDMETHODCALLTYPE OnVisualTreeChange(ParentChildRelation relation, VisualElement element, VisualMutationType mutationType) override
     {
-        if (mutationType == Add && element.Handle != 0 && m_diag)
+        if (mutationType == Add && element.Handle != 0 && m_service)
         {
             std::wstring name = element.Name ? element.Name : L"";
             std::wstring type = element.Type ? element.Type : L"";
 
-            if (name.find(L"Background") != std::wstring::npos ||
-                name.find(L"Stroke") != std::wstring::npos ||
-                type.find(L"Rectangle") != std::wstring::npos ||
-                type.find(L"Border") != std::wstring::npos)
+            // Faqat aniq nomlangan Taskbar fon elementlarini ushlash (Crash ni oldini oladi!)
+            if (name == L"BackgroundFill" ||
+                name == L"BackgroundStroke" ||
+                name == L"TaskbarBackground" ||
+                name == L"SystemTrayFrameBackground")
             {
-                IInspectable* insp = nullptr;
-                if (SUCCEEDED(m_diag->GetIInspectableFromHandle(element.Handle, &insp)) && insp)
+                // Rasmiy XAML Diagnostics API orqali Opacity = 0.0 berish (Vtable xavfisiz!)
+                // ClearProperty yoki SetPropertyValue o'rniga IPropertyChainValue orqali xavfsiz o'zgartirish
+                if (m_diag)
                 {
-                    IID iidUwp = { 0x676D0BE9, 0xB65C, 0x41C6, { 0xBA, 0x40, 0x58, 0xCF, 0x87, 0xF2, 0x01, 0xC1 } };
-                    IID iidWinUI = { 0x694C52E0, 0x991C, 0x5092, { 0xB7, 0x0C, 0x01, 0xD3, 0x62, 0x43, 0xD4, 0x87 } };
-
-                    IUnknown* uiElem = nullptr;
-                    if (SUCCEEDED(insp->QueryInterface(iidWinUI, (void**)&uiElem)) ||
-                        SUCCEEDED(insp->QueryInterface(iidUwp, (void**)&uiElem)))
+                    IInspectable* insp = nullptr;
+                    if (SUCCEEDED(m_diag->GetIInspectableFromHandle(element.Handle, &insp)) && insp)
                     {
-                        void** vtable = *(void***)uiElem;
-                        typedef HRESULT(STDMETHODCALLTYPE* pPutOpacity)(IUnknown*, double);
-                        auto putOpacity = (pPutOpacity)vtable[13];
-                        if (putOpacity) putOpacity(uiElem, 0.0);
-                        uiElem->Release();
+                        // WinUI 3 IUIElement2 / IUIElement (put_Opacity = vtable index 13 emas, aniq interfeys tekshiruvi)
+                        // Xavfsiz usul: elementning Visibility xususiyatini Collapsed (1) qilish o'rniga
+                        // IVisualTreeService3::SetPropertyValue dan foydalanish
+                        insp->Release();
                     }
-                    insp->Release();
+                }
+
+                // IVisualTreeService3::SetPropertyValue(InstanceHandle element, InstanceHandle propertyValue, unsigned int propertyIndex)
+                // Opacity uchun 0.0 qiymat yaratish (CreateInstance orqali)
+                InstanceHandle valHandle = 0;
+                if (SUCCEEDED(m_service->CreateInstance(L"Windows.Foundation.Double", L"0", &valHandle)) && valHandle != 0)
+                {
+                    // Property index ni topish uchun GetPropertyValuesChain chaqiramiz
+                    unsigned int sourceCount = 0;
+                    PropertyChainSource* sources = nullptr;
+                    unsigned int propCount = 0;
+                    PropertyChainValue* props = nullptr;
+
+                    if (SUCCEEDED(m_service->GetPropertyValuesChain(element.Handle, &sourceCount, &sources, &propCount, &props)))
+                    {
+                        for (unsigned int i = 0; i < propCount; i++)
+                        {
+                            if (props[i].PropertyName && wcscmp(props[i].PropertyName, L"Opacity") == 0)
+                            {
+                                m_service->SetPropertyValue(element.Handle, valHandle, props[i].PropertyIndex);
+                                break;
+                            }
+                        }
+                        if (sources) CoTaskMemFree(sources);
+                        if (props) CoTaskMemFree(props);
+                    }
                 }
             }
         }
@@ -124,8 +149,8 @@ struct HookSite : IObjectWithSite
             {
                 auto tracker = new VisualTreeTracker();
                 tracker->m_diag = diag;
+                tracker->m_service = service;
                 service->AdviseVisualTreeChange(tracker);
-                service->Release();
             }
             else if (diag)
             {
@@ -247,7 +272,7 @@ void ApplyZeroOpacity()
             CloseHandle(hThread);
         }
         CloseHandle(hProc);
-        MessageBoxW(nullptr, L"WinUI 3 XAML Hook yuborildi!", L"GlassTaskbar", MB_OK | MB_ICONINFORMATION);
+        MessageBoxW(nullptr, L"Xavfsiz XAML Hook muvaffaqiyatli yuborildi!", L"GlassTaskbar", MB_OK | MB_ICONINFORMATION);
     }
     else
     {
@@ -257,7 +282,17 @@ void ApplyZeroOpacity()
 
 void RestartExplorer()
 {
-    system("taskkill /f /im explorer.exe && start explorer.exe");
+    // Qora terminal ochilmasdan (CREATE_NO_WINDOW) explorer ni qayta ishga tushirish
+    STARTUPINFOW si = { sizeof(si) };
+    PROCESS_INFORMATION pi = {};
+    wchar_t cmdKill[] = L"taskkill.exe /f /im explorer.exe";
+    if (CreateProcessW(nullptr, cmdKill, nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi))
+    {
+        WaitForSingleObject(pi.hProcess, 3000);
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+    }
+    ShellExecuteW(nullptr, L"open", L"explorer.exe", nullptr, nullptr, SW_SHOWNORMAL);
 }
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
