@@ -17,7 +17,7 @@
 struct VisualTreeTracker : IVisualTreeServiceCallback2
 {
     LONG m_ref = 1;
-    IVisualTreeService3* m_service = nullptr;
+    IXamlDiagnostics* m_diag = nullptr;
 
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override
     {
@@ -35,13 +35,17 @@ struct VisualTreeTracker : IVisualTreeServiceCallback2
     ULONG STDMETHODCALLTYPE Release() override
     {
         ULONG r = InterlockedDecrement(&m_ref);
-        if (r == 0) delete this;
+        if (r == 0)
+        {
+            if (m_diag) m_diag->Release();
+            delete this;
+        }
         return r;
     }
 
     HRESULT STDMETHODCALLTYPE OnVisualTreeChange(ParentChildRelation relation, VisualElement element, VisualMutationType mutationType) override
     {
-        if (mutationType == Add && element.Handle != 0 && m_service)
+        if (mutationType == Add && element.Handle != 0 && m_diag)
         {
             std::wstring name = element.Name ? element.Name : L"";
             std::wstring type = element.Type ? element.Type : L"";
@@ -52,7 +56,7 @@ struct VisualTreeTracker : IVisualTreeServiceCallback2
                 type.find(L"Border") != std::wstring::npos)
             {
                 IInspectable* insp = nullptr;
-                if (SUCCEEDED(m_service->GetIInspectableFromHandle(element.Handle, &insp)) && insp)
+                if (SUCCEEDED(m_diag->GetIInspectableFromHandle(element.Handle, &insp)) && insp)
                 {
                     IID iidUwp = { 0x676D0BE9, 0xB65C, 0x41C6, { 0xBA, 0x40, 0x58, 0xCF, 0x87, 0xF2, 0x01, 0xC1 } };
                     IID iidWinUI = { 0x694C52E0, 0x991C, 0x5092, { 0xB7, 0x0C, 0x01, 0xD3, 0x62, 0x43, 0xD4, 0x87 } };
@@ -113,11 +117,19 @@ struct HookSite : IObjectWithSite
         {
             m_site->AddRef();
             IVisualTreeService3* service = nullptr;
+            IXamlDiagnostics* diag = nullptr;
+            m_site->QueryInterface(__uuidof(IXamlDiagnostics), (void**)&diag);
+
             if (SUCCEEDED(m_site->QueryInterface(__uuidof(IVisualTreeService3), (void**)&service)) && service)
             {
                 auto tracker = new VisualTreeTracker();
-                tracker->m_service = service;
+                tracker->m_diag = diag;
                 service->AdviseVisualTreeChange(tracker);
+                service->Release();
+            }
+            else if (diag)
+            {
+                diag->Release();
             }
         }
         return S_OK;
