@@ -5,46 +5,71 @@
 #include <tlhelp32.h>
 #include <xamlom.h>
 #include <inspectable.h>
-
-#undef GetCurrentTime
-
-#include <winrt/Windows.Foundation.h>
-#include <winrt/Windows.UI.Xaml.h>
 #include <string>
 
-#pragma comment(lib, "windowsapp.lib")
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "ole32.lib")
 
-using namespace winrt;
-using namespace Windows::UI::Xaml;
+// ==========================================
+// 1-QISM: XAML VISUAL TREE TRACKER (WINUI 3 + UWP)
+// ==========================================
 
-struct VisualTreeTracker : winrt::implements<VisualTreeTracker, IVisualTreeServiceCallback2>
+struct VisualTreeTracker : IVisualTreeServiceCallback2
 {
+    LONG m_ref = 1;
+    IVisualTreeService3* m_service = nullptr;
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override
+    {
+        if (riid == __uuidof(IUnknown) || riid == __uuidof(IVisualTreeServiceCallback) || riid == __uuidof(IVisualTreeServiceCallback2))
+        {
+            *ppv = static_cast<IVisualTreeServiceCallback2*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *ppv = nullptr;
+        return E_NOINTERFACE;
+    }
+
+    ULONG STDMETHODCALLTYPE AddRef() override { return InterlockedIncrement(&m_ref); }
+    ULONG STDMETHODCALLTYPE Release() override
+    {
+        ULONG r = InterlockedDecrement(&m_ref);
+        if (r == 0) delete this;
+        return r;
+    }
+
     HRESULT STDMETHODCALLTYPE OnVisualTreeChange(ParentChildRelation relation, VisualElement element, VisualMutationType mutationType) override
     {
-        if (mutationType == Add && element.Handle != 0)
+        if (mutationType == Add && element.Handle != 0 && m_service)
         {
-            try
+            std::wstring name = element.Name ? element.Name : L"";
+            std::wstring type = element.Type ? element.Type : L"";
+
+            if (name.find(L"Background") != std::wstring::npos ||
+                name.find(L"Stroke") != std::wstring::npos ||
+                type.find(L"Rectangle") != std::wstring::npos ||
+                type.find(L"Border") != std::wstring::npos)
             {
-                std::wstring name = element.Name ? element.Name : L"";
-                std::wstring type = element.Type ? element.Type : L"";
-
-                if (name.find(L"Background") != std::wstring::npos || 
-                    name.find(L"SystemTray") != std::wstring::npos ||
-                    type.find(L"TaskbarFrame") != std::wstring::npos)
+                IInspectable* insp = nullptr;
+                if (SUCCEEDED(m_service->GetIInspectableFromHandle(element.Handle, &insp)) && insp)
                 {
-                    IInspectable* insp = reinterpret_cast<IInspectable*>(element.Handle);
-                    UIElement uiElem{ nullptr };
-                    winrt::copy_from_abi(uiElem, insp);
+                    IID iidUwp = { 0x676D0BE9, 0xB65C, 0x41C6, { 0xBA, 0x40, 0x58, 0xCF, 0x87, 0xF2, 0x01, 0xC1 } };
+                    IID iidWinUI = { 0x694C52E0, 0x991C, 0x5092, { 0xB7, 0x0C, 0x01, 0xD3, 0x62, 0x43, 0xD4, 0x87 } };
 
-                    if (uiElem)
+                    IUnknown* uiElem = nullptr;
+                    if (SUCCEEDED(insp->QueryInterface(iidWinUI, (void**)&uiElem)) ||
+                        SUCCEEDED(insp->QueryInterface(iidUwp, (void**)&uiElem)))
                     {
-                        uiElem.Opacity(0.0);
+                        void** vtable = *(void***)uiElem;
+                        typedef HRESULT(STDMETHODCALLTYPE* pPutOpacity)(IUnknown*, double);
+                        auto putOpacity = (pPutOpacity)vtable[13];
+                        if (putOpacity) putOpacity(uiElem, 0.0);
+                        uiElem->Release();
                     }
+                    insp->Release();
                 }
             }
-            catch (...) {}
         }
         return S_OK;
     }
@@ -55,39 +80,44 @@ struct VisualTreeTracker : winrt::implements<VisualTreeTracker, IVisualTreeServi
     }
 };
 
-extern "C" __declspec(dllexport) HRESULT WINAPI InitializeXamlDiagnostics()
+struct HookSite : IObjectWithSite
 {
-    HMODULE wux = GetModuleHandleW(L"Windows.UI.Xaml.dll");
-    if (!wux) return E_FAIL;
+    LONG m_ref = 1;
+    IUnknown* m_site = nullptr;
 
-    using pfnInitializeXamlDiagnosticsEx = HRESULT(WINAPI*)(LPCWSTR, DWORD, LPCWSTR, LPCWSTR, CLSID, LPCWSTR);
-    auto initFunc = reinterpret_cast<pfnInitializeXamlDiagnosticsEx>(GetProcAddress(wux, "InitializeXamlDiagnosticsEx"));
-    if (!initFunc) return E_FAIL;
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override
+    {
+        if (riid == __uuidof(IUnknown) || riid == __uuidof(IObjectWithSite))
+        {
+            *ppv = static_cast<IObjectWithSite*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *ppv = nullptr;
+        return E_NOINTERFACE;
+    }
 
-    wchar_t modPath[MAX_PATH];
-    HMODULE hMod = nullptr;
-    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-        reinterpret_cast<LPCWSTR>(&InitializeXamlDiagnostics), &hMod);
-    GetModuleFileNameW(hMod, modPath, MAX_PATH);
-
-    CLSID clsid = { 0x361c3466, 0x8573, 0x4e2a, { 0xb1, 0xb2, 0x9d, 0x1c, 0x7f, 0x4d, 0x8a, 0x11 } };
-    return initFunc(L"VisualDiagConnection1", GetCurrentProcessId(), L"", modPath, clsid, L"");
-}
-
-struct HookSite : winrt::implements<HookSite, IObjectWithSite>
-{
-    winrt::com_ptr<IUnknown> m_site;
+    ULONG STDMETHODCALLTYPE AddRef() override { return InterlockedIncrement(&m_ref); }
+    ULONG STDMETHODCALLTYPE Release() override
+    {
+        ULONG r = InterlockedDecrement(&m_ref);
+        if (r == 0) { if (m_site) m_site->Release(); delete this; }
+        return r;
+    }
 
     HRESULT STDMETHODCALLTYPE SetSite(IUnknown* pUnkSite) override
     {
-        m_site.copy_from(pUnkSite);
+        if (m_site) m_site->Release();
+        m_site = pUnkSite;
         if (m_site)
         {
-            auto service = m_site.try_as<IVisualTreeService3>();
-            if (service)
+            m_site->AddRef();
+            IVisualTreeService3* service = nullptr;
+            if (SUCCEEDED(m_site->QueryInterface(__uuidof(IVisualTreeService3), (void**)&service)) && service)
             {
-                auto tracker = winrt::make<VisualTreeTracker>();
-                service->AdviseVisualTreeChange(tracker.get());
+                auto tracker = new VisualTreeTracker();
+                tracker->m_service = service;
+                service->AdviseVisualTreeChange(tracker);
             }
         }
         return S_OK;
@@ -99,12 +129,29 @@ struct HookSite : winrt::implements<HookSite, IObjectWithSite>
     }
 };
 
-struct HookFactory : winrt::implements<HookFactory, IClassFactory>
+struct HookFactory : IClassFactory
 {
-    HRESULT STDMETHODCALLTYPE CreateInstance(IUnknown* pUnkOuter, REFIID riid, LPVOID* ppvObject) override
+    LONG m_ref = 1;
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override
+    {
+        if (riid == __uuidof(IUnknown) || riid == __uuidof(IClassFactory))
+        {
+            *ppv = static_cast<IClassFactory*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *ppv = nullptr;
+        return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return InterlockedIncrement(&m_ref); }
+    ULONG STDMETHODCALLTYPE Release() override { ULONG r = InterlockedDecrement(&m_ref); if (r == 0) delete this; return r; }
+    HRESULT STDMETHODCALLTYPE CreateInstance(IUnknown* pUnkOuter, REFIID riid, void** ppvObject) override
     {
         if (pUnkOuter) return CLASS_E_NOAGGREGATION;
-        return winrt::make<HookSite>()->QueryInterface(riid, ppvObject);
+        auto site = new HookSite();
+        HRESULT hr = site->QueryInterface(riid, ppvObject);
+        site->Release();
+        return hr;
     }
     HRESULT STDMETHODCALLTYPE LockServer(BOOL) override { return S_OK; }
 };
@@ -114,40 +161,46 @@ STDAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, LPVOID* ppv)
     CLSID clsid = { 0x361c3466, 0x8573, 0x4e2a, { 0xb1, 0xb2, 0x9d, 0x1c, 0x7f, 0x4d, 0x8a, 0x11 } };
     if (rclsid == clsid)
     {
-        return winrt::make<HookFactory>()->QueryInterface(riid, ppv);
+        auto factory = new HookFactory();
+        HRESULT hr = factory->QueryInterface(riid, ppv);
+        factory->Release();
+        return hr;
     }
     return CLASS_E_CLASSNOTAVAILABLE;
 }
 
-struct AccentPolicy {
-    int AccentState;
-    int AccentFlags;
-    uint32_t GradientColor;
-    int AnimationId;
-};
+void StartXamlHookInExplorer()
+{
+    wchar_t modPath[MAX_PATH];
+    HMODULE hMod = nullptr;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+        reinterpret_cast<LPCWSTR>(&StartXamlHookInExplorer), &hMod);
+    GetModuleFileNameW(hMod, modPath, MAX_PATH);
 
-struct WindowCompositionAttributeData {
-    int Attribute;
-    void* Data;
-    int SizeOfData;
-};
+    CLSID clsid = { 0x361c3466, 0x8573, 0x4e2a, { 0xb1, 0xb2, 0x9d, 0x1c, 0x7f, 0x4d, 0x8a, 0x11 } };
+    using pfnInit = HRESULT(WINAPI*)(LPCWSTR, DWORD, LPCWSTR, LPCWSTR, CLSID, LPCWSTR);
+
+    HMODULE mux = GetModuleHandleW(L"Microsoft.UI.Xaml.dll");
+    if (mux)
+    {
+        auto initFunc = (pfnInit)GetProcAddress(mux, "InitializeXamlDiagnosticsEx");
+        if (initFunc) initFunc(L"VisualDiagConnection1", GetCurrentProcessId(), L"", modPath, clsid, L"");
+    }
+
+    HMODULE wux = GetModuleHandleW(L"Windows.UI.Xaml.dll");
+    if (wux)
+    {
+        auto initFunc = (pfnInit)GetProcAddress(wux, "InitializeXamlDiagnosticsEx");
+        if (initFunc) initFunc(L"VisualDiagConnection2", GetCurrentProcessId(), L"", modPath, clsid, L"");
+    }
+}
+
+// ==========================================
+// 2-QISM: BOSHQARUV UI VA INJECTOR
+// ==========================================
 
 void ApplyZeroOpacity()
 {
-    HWND taskbar = FindWindowW(L"Shell_TrayWnd", nullptr);
-    if (taskbar)
-    {
-        HMODULE user32 = GetModuleHandleW(L"user32.dll");
-        using pSetWindowCompositionAttribute = int(WINAPI*)(HWND, WindowCompositionAttributeData*);
-        auto setComp = reinterpret_cast<pSetWindowCompositionAttribute>(GetProcAddress(user32, "SetWindowCompositionAttribute"));
-        if (setComp)
-        {
-            AccentPolicy accent = { 2, 2, 0x00000000, 0 };
-            WindowCompositionAttributeData data = { 19, &accent, sizeof(accent) };
-            setComp(taskbar, &data);
-        }
-    }
-
     DWORD explorerPid = 0;
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     PROCESSENTRY32W pe = { sizeof(pe) };
@@ -174,11 +227,15 @@ void ApplyZeroOpacity()
         void* remoteMem = VirtualAllocEx(hProc, nullptr, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
         WriteProcessMemory(hProc, remoteMem, exePath, size, nullptr);
 
-        auto loadLib = reinterpret_cast<LPTHREAD_START_ROUTINE>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "LoadLibraryW"));
+        auto loadLib = (LPTHREAD_START_ROUTINE)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "LoadLibraryW");
         HANDLE hThread = CreateRemoteThread(hProc, nullptr, 0, loadLib, remoteMem, 0, nullptr);
-        if (hThread) CloseHandle(hThread);
+        if (hThread)
+        {
+            WaitForSingleObject(hThread, 2000);
+            CloseHandle(hThread);
+        }
         CloseHandle(hProc);
-        MessageBoxW(nullptr, L"XAML qatlami mutlaq 0 Opacity holatiga o'tkazildi!", L"GlassTaskbar", MB_OK | MB_ICONINFORMATION);
+        MessageBoxW(nullptr, L"WinUI 3 XAML Hook yuborildi!", L"GlassTaskbar", MB_OK | MB_ICONINFORMATION);
     }
     else
     {
@@ -248,8 +305,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID)
         {
             DisableThreadLibraryCalls(hModule);
             CreateThread(nullptr, 0, [](LPVOID) -> DWORD {
-                Sleep(500);
-                InitializeXamlDiagnostics();
+                StartXamlHookInExplorer();
                 return 0;
             }, nullptr, 0, nullptr);
         }
