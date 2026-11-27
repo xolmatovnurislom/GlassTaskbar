@@ -1,8 +1,10 @@
-name: Build Single-File GlassTaskbar
+name: Build GlassTaskbar
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
@@ -10,20 +12,30 @@ jobs:
     runs-on: windows-latest
 
     steps:
-    - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    - name: Setup MSVC (C++ Compiler)
-      uses: ilammy/msvc-dev-cmd@v1
-      with:
-        arch: x64
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
 
-    - name: Compile All-in-One EXE
-      run: |
-        mkdir publish
-        cl /O2 /EHsc /std:c++20 /SUBSYSTEM:WINDOWS main.cpp /Fe:publish/GlassTaskbar.exe
+      - name: Build GlassHook.dll
+        shell: cmd
+        run: |
+          cl /nologo /EHsc /std:c++17 /DUNICODE /D_UNICODE /LD GlassHook.cpp /link /OUT:GlassHook.dll user32.lib ole32.lib oleaut32.lib shell32.lib
+          dir
 
-    - name: Upload EXE Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: GlassTaskbar-AllInOne
-        path: ./publish/GlassTaskbar.exe
+      - name: Build GlassTaskbar.exe
+        shell: cmd
+        run: |
+          cl /nologo /EHsc /std:c++17 /DUNICODE /D_UNICODE main.cpp /link /OUT:GlassTaskbar.exe user32.lib ole32.lib oleaut32.lib shell32.lib
+          dir
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: GlassTaskbar-x64
+          path: |
+            GlassHook.dll
+            GlassTaskbar.exe
