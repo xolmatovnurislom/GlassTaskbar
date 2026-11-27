@@ -3,8 +3,6 @@ name: Build GlassTaskbar
 on:
   push:
     branches: [ main ]
-  pull_request:
-    branches: [ main ]
   workflow_dispatch:
 
 jobs:
@@ -20,13 +18,17 @@ jobs:
         with:
           arch: x64
 
-      - name: Build GlassHook.dll
+      - name: List files
+        shell: cmd
+        run: dir
+
+      - name: Build GlassHook.dll from main.cpp
         shell: cmd
         run: |
-          cl /nologo /EHsc /std:c++17 /DUNICODE /D_UNICODE /LD GlassHook.cpp /link /OUT:GlassHook.dll user32.lib ole32.lib oleaut32.lib shell32.lib
+          cl /nologo /EHsc /std:c++17 /DUNICODE /D_UNICODE /DGLASS_HOOK_DLL /LD main.cpp /link /OUT:GlassHook.dll user32.lib ole32.lib oleaut32.lib shell32.lib
           dir
 
-      - name: Build GlassTaskbar.exe
+      - name: Build GlassTaskbar.exe from main.cpp
         shell: cmd
         run: |
           cl /nologo /EHsc /std:c++17 /DUNICODE /D_UNICODE main.cpp /link /OUT:GlassTaskbar.exe user32.lib ole32.lib oleaut32.lib shell32.lib
